@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="bar">
+        <button id="tab-dash" class="tab active" title="Ctrl+Shift+D">Dashboard</button>
+        <div id="tabs"></div>
+        <button id="add" title="New Claude Code terminal">+</button>
+        <span id="ws"></span>
+      </header>
+      <main>
+        <section id="dash">
+          <div id="canvas">
+            <svg id="edges">
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" class="arrow-head" />
+                </marker>
+              </defs>
+              <g id="edge-paths"></g>
+            </svg>
+            <div id="nodes"></div>
+          </div>
+          <div id="empty">Press <b>+</b> to start a Claude Code terminal in this folder.</div>
+        </section>
+        <section id="terms"></section>
+      </main>
+    </div>
+    <div id="menu" class="hidden" role="menu">
+      <button id="menu-remove" role="menuitem"><span id="menu-label">Remove</span><small id="menu-sub"></small></button>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
