@@ -10,7 +10,7 @@ interface HookEvent {
   event: string;
   sessionId: string;
   source: string | null;
-  status: Exclude<Status, "starting" | "exited">;
+  status: Exclude<Status, "starting" | "exited" | "saved">;
   name: string | null;
   parentSessionId: string | null;
   /** Present when the event comes from a subagent of `sessionId`. */
@@ -57,7 +57,7 @@ const graph = new Graph(
   $<SVGGElement>("#edge-paths"),
   $<SVGSVGElement>("#edges"),
   $("#empty"),
-  (n) => openTerminal(n.termId),
+  (n) => openNode(n),
   (n, x, y) => showMenu(n, x, y),
 );
 const pan = enablePan(dashEl, $("#canvas"));
@@ -192,6 +192,70 @@ function render() {
   graph.render([...nodes.values()]);
   pan.setContentSize(graph.width, graph.height);
   renderTabs();
+  scheduleSave();
+}
+
+// --- Remembered sessions -------------------------------------------------------------------
+// Only sessions that ran in dashboard terminals are ever in `nodes` (hooks are injected per
+// terminal), so sessions started natively with `claude` are never remembered. Live status isn't
+// saved: after a restart every session is "saved" and clicking it resumes it.
+
+interface SavedNode {
+  id: string;
+  name: string;
+  parent?: string;
+  kind?: "agent";
+  agentType?: string;
+  seq: number;
+}
+
+let lastSaved = "";
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+/** Saving waits for the restore, so an early render can never overwrite what's on disk with an empty state. */
+let restored = false;
+
+function serializeState(): string {
+  const list: SavedNode[] = [...nodes.values()]
+    .filter((n) => !n.id.startsWith("pending-"))
+    .map((n) => ({ id: n.id, name: n.name, parent: n.parent, kind: n.kind, agentType: n.agentType, seq: n.seq }));
+  return JSON.stringify({ version: 1, nodes: list });
+}
+
+function scheduleSave() {
+  if (!restored) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (!nodes.size && !lastSaved) return; // nothing to remember yet: don't create a file
+    const json = serializeState();
+    if (json === lastSaved) return;
+    lastSaved = json;
+    invoke("save_state", { json }).catch(() => {});
+  }, 400);
+}
+
+async function restoreState() {
+  const raw = await invoke<string | null>("load_state").catch(() => null);
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw) as { nodes?: SavedNode[] };
+    for (const n of saved.nodes ?? []) {
+      nodes.set(n.id, {
+        id: n.id,
+        termId: -1, // no terminal until it is resumed
+        name: n.name,
+        status: n.kind === "agent" ? "done" : "saved",
+        parent: n.parent,
+        detached: false,
+        seq: n.seq,
+        kind: n.kind,
+        agentType: n.agentType,
+      });
+      seq = Math.max(seq, n.seq + 1);
+    }
+    lastSaved = serializeState();
+  } catch {
+    /* unreadable state file: start empty */
+  }
 }
 
 function showDashboard() {
@@ -222,17 +286,35 @@ function openTerminal(termId: number) {
   if (tab) showTab(tab);
 }
 
-async function addTerminal() {
+/** Clicking a box: show its terminal if it has a live one, otherwise resume the session in a new terminal. */
+function openNode(n: SessionNode) {
+  const target = n.kind === "agent" ? (nodes.get(n.parent ?? "") ?? n) : n; // agents live inside their session
+  const hasTerminal = tabs.has(target.termId) && target.status !== "saved" && target.status !== "exited";
+  if (hasTerminal) openTerminal(target.termId);
+  else if (target.kind !== "agent" && !target.id.startsWith("pending-")) void addTerminal(target.id);
+}
+
+/** New Claude terminal; with `resumeId`, it resumes that remembered session instead of starting fresh. */
+async function addTerminal(resumeId?: string) {
   const tab = new TermTab(termsEl, () => touch(tab.id));
   showTab(tab); // must be visible before xterm can measure itself
-  await tab.start(true);
+  await tab.start(true, resumeId);
   tabs.set(tab.id, tab);
   touch(tab.id);
   ensureInBar(tab.id);
 
-  const id = `pending-${tab.id}`;
-  nodes.set(id, { id, termId: tab.id, name: "Starting Claude…", status: "starting", detached: false, seq: seq++ });
-  current.set(tab.id, id);
+  const resumed = resumeId ? nodes.get(resumeId) : undefined;
+  if (resumed) {
+    // Same box, now backed by a live terminal again.
+    resumed.termId = tab.id;
+    resumed.status = "starting";
+    resumed.detached = false;
+    current.set(tab.id, resumed.id);
+  } else {
+    const id = `pending-${tab.id}`;
+    nodes.set(id, { id, termId: tab.id, name: "Starting Claude…", status: "starting", detached: false, seq: seq++ });
+    current.set(tab.id, id);
+  }
   render();
 }
 
@@ -311,20 +393,28 @@ function onHook(e: HookEvent) {
   if (!node || e.event === "SessionStart") {
     // A session just became (or became again) the one this terminal is running.
     let nodeSeq = seq;
+    let resumedFrom: string | undefined;
     if (prevId && prevId !== e.sessionId) {
       const prev = nodes.get(prevId);
       if (prev && prevId.startsWith("pending-")) {
         nodes.delete(prevId); // placeholder replaced by the real session
         nodeSeq = prev.seq;
       } else if (prev) {
-        prev.detached = true; // forked / cleared / resumed elsewhere: old session stays on the graph
+        // Forked / cleared / resumed elsewhere: the old session stays on the graph.
+        if (prev.status === "starting") {
+          // We were resuming it but Claude came up under a new id: that id is a continuation of it.
+          prev.status = "saved";
+          resumedFrom = prevId;
+        }
+        prev.detached = true;
       }
     }
     if (!node) {
-      node = { id: e.sessionId, termId: e.termId, name: "Untitled session", status: e.status, detached: false, seq: nodeSeq };
+      node = { id: e.sessionId, termId: e.termId, name: "Untitled session", status: e.status, detached: false, seq: nodeSeq, parent: resumedFrom };
       if (nodeSeq === seq) seq++;
       nodes.set(e.sessionId, node);
     }
+    node.termId = e.termId; // a remembered session now lives in this terminal
     node.detached = false;
     current.set(e.termId, e.sessionId);
   }
@@ -342,7 +432,7 @@ function onExit(termId: number) {
   render();
 }
 
-$("#add").addEventListener("click", addTerminal);
+$("#add").addEventListener("click", () => void addTerminal());
 dashTab.addEventListener("click", showDashboard);
 // Capture phase: xterm stops key events from bubbling, so the app has to see them first.
 window.addEventListener(
@@ -376,4 +466,7 @@ window.addEventListener(
 listen<HookEvent>("hook", (ev) => onHook(ev.payload));
 listen<number>("pty-exit", (ev) => onExit(ev.payload));
 invoke<string>("get_workspace").then((p) => ($("#ws").textContent = p));
-showDashboard();
+restoreState().then(() => {
+  restored = true;
+  showDashboard();
+});

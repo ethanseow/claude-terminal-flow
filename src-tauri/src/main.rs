@@ -65,8 +65,15 @@ fn pty_spawn(
     cols: u16,
     rows: u16,
     claude: bool,
+    resume: Option<String>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
+    // The id ends up on a shell command line, so only accept what a session id can contain.
+    if let Some(id) = &resume {
+        if id.len() < 8 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Err(format!("invalid session id: {id}"));
+        }
+    }
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
@@ -86,6 +93,7 @@ fn pty_spawn(
         "CLAUDE_CODE_MESSAGING_SOCKET",
         "CLAUDE_CODE_MESSAGING_TOKEN",
         "CLAUDE_PID",
+        "DASHBOARD_FOREGROUND", // so `dashboard` run inside a terminal still detaches
     ] {
         cmd.env_remove(var);
     }
@@ -105,7 +113,8 @@ fn pty_spawn(
     // It's a normal shell; we just type `claude` into it so that exiting Claude drops back
     // to the prompt like any terminal.
     if claude {
-        let line = format!("claude --settings \"{}\"\r", cfg.settings_path.display());
+        let resume = resume.map(|id| format!("--resume {id} ")).unwrap_or_default();
+        let line = format!("claude {resume}--settings \"{}\"\r", cfg.settings_path.display());
         writer.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
     }
 
@@ -156,6 +165,69 @@ fn pty_kill(state: State<'_, Sessions>, id: u32) {
     }
 }
 
+/// 64-bit FNV-1a. Stable across Rust versions (unlike `DefaultHasher`), so state files keep their names.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// Where this folder's remembered sessions live (one file per workspace).
+fn state_file(app: &AppHandle, workspace: &Path) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("workspaces");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{:016x}.json", fnv1a(workspace.to_string_lossy().as_bytes()))))
+}
+
+#[tauri::command]
+fn load_state(app: AppHandle, cfg: State<'_, AppState>) -> Option<String> {
+    std::fs::read_to_string(state_file(&app, &cfg.workspace).ok()?).ok()
+}
+
+#[tauri::command]
+fn save_state(app: AppHandle, cfg: State<'_, AppState>, json: String) -> Result<(), String> {
+    let path = state_file(&app, &cfg.workspace)?;
+    // Write-then-rename so a crash mid-write can't leave a half-written file.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+const USAGE: &str = "dashboard: run and watch many Claude Code terminals
+
+Usage: dashboard [folder]
+
+  folder    Directory the terminals open in (default: the current directory).
+            Sessions started here are remembered per folder.
+
+Options:
+  -h, --help       Show this help
+  -V, --version    Show the version";
+
+/// In release builds on Unix, hand off to a detached copy and return the shell prompt, like any
+/// GUI launcher. (Windows release builds are GUI-subsystem and don't hold the console.)
+#[cfg(all(unix, not(debug_assertions)))]
+fn detach_from_shell(workspace: &Path) {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    if std::env::var_os("DASHBOARD_FOREGROUND").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let spawned = Command::new(exe)
+        .arg(workspace)
+        .env("DASHBOARD_FOREGROUND", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    if spawned.is_ok() {
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(all(unix, not(debug_assertions))))]
+fn detach_from_shell(_workspace: &Path) {}
+
 /// `dashboard [dir]`: the first non-flag argument is the folder terminals run in.
 fn resolve_workspace() -> PathBuf {
     let arg = std::env::args().skip(1).find(|a| !a.starts_with('-'));
@@ -204,7 +276,18 @@ fn main() {
         return;
     }
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}");
+        return;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("dashboard {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let workspace = resolve_workspace();
+    detach_from_shell(&workspace);
 
     tauri::Builder::default()
         .manage(Sessions::default())
@@ -225,6 +308,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_workspace,
+            load_state,
+            save_state,
             pty_spawn,
             pty_write,
             pty_resize,

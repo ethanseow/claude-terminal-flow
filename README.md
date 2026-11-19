@@ -7,6 +7,7 @@ A dashboard for running many [Claude Code](https://claude.com/claude-code) termi
 - **Fork lineage.** `/branch` and `--fork-session` produce a child box with an arrow from its parent, laid out top to bottom.
 - **Background work.** Subagents and background shell tasks (e.g. `sleep 60`) appear as dashed children of the session that started them.
 - **Tabs.** Up to 3 terminals sit in the top bar; opening a 4th evicts the least recently used. Evicted terminals keep running and stay on the dashboard.
+- **Remembers sessions per folder.** Sessions started in dashboard terminals are saved and come back after a restart as `saved` boxes with their fork arrows. Click one to resume it (`claude --resume`). Sessions you start natively with `claude` are never tracked.
 - **Right-click → Remove** archives a session and everything forked from it (dashboard only; transcripts are untouched, so `claude --resume` still works).
 
 Built with [Tauri 2](https://tauri.app) (Rust: `portable-pty`) and TypeScript (Vite, xterm.js).
@@ -20,12 +21,17 @@ npm install
 npm run tauri dev -- -- ~/some/folder   # terminals open in this folder (default: current directory)
 ```
 
-Release build, giving a `dashboard` binary you can put on your `PATH`:
+Install a `dashboard` command (release build, linked into `~/.local/bin`; set `DASHBOARD_BIN_DIR` to use another folder):
 
 ```sh
-npm run tauri build -- --no-bundle
-./src-tauri/target/release/dashboard ~/some/folder
+npm run install:cli
+dashboard ~/some/folder    # returns your prompt; the window runs on its own
+dashboard --help
 ```
+
+The first time Claude Code runs in a folder it may ask whether you trust it. That prompt appears in the dashboard's terminal like anywhere else.
+
+Remembered sessions live in the app data folder (on Linux, `~/.local/share/com.claudeterminalflow.app/workspaces/`), one file per folder.
 
 ## How it works
 

@@ -39,7 +39,7 @@ export class TermTab {
   }
 
   /** The host must already be visible so xterm can measure itself. */
-  async start(claude: boolean) {
+  async start(claude: boolean, resume?: string) {
     this.term.open(this.host);
     this.opened = true;
     this.attachWebgl();
@@ -53,6 +53,7 @@ export class TermTab {
       cols: this.term.cols,
       rows: this.term.rows,
       claude,
+      resume: resume ?? null,
       onData,
     });
     this.term.onData((data) => {

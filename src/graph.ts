@@ -1,4 +1,4 @@
-export type Status = "starting" | "idle" | "working" | "waiting" | "ended" | "exited" | "done";
+export type Status = "starting" | "idle" | "working" | "waiting" | "ended" | "exited" | "done" | "saved";
 
 export interface SessionNode {
   id: string; // Claude session id (or "pending-<term>" until the first hook arrives)
@@ -28,6 +28,7 @@ const LABEL: Record<Status, string> = {
   ended: "ended",
   exited: "exited",
   done: "done",
+  saved: "saved · click to resume",
 };
 
 export class Graph {
@@ -140,7 +141,7 @@ export class Graph {
       const base = n.detached && n.status !== "exited" ? "inactive" : LABEL[n.status];
       const agents = running.get(n.id) ?? 0;
       setText(el.querySelector(".label")!, agents ? `${base} · ${agents} in background` : base);
-      setText(el.querySelector(".term")!, n.kind === "agent" ? (n.agentType ?? "agent") : `term ${n.termId}`);
+      setText(el.querySelector(".term")!, n.kind === "agent" ? (n.agentType ?? "agent") : n.termId >= 0 ? `term ${n.termId}` : "");
     }
 
     // Edges: parent -> child, with an arrowhead at the child.
